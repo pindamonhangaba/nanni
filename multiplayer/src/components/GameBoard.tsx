@@ -6,6 +6,7 @@ import { ResourceCard } from './ResourceCard';
 import { BuyOffer } from './BuyOffer';
 import { OfferModal } from './OfferModal';
 import { monitorForElements } from '@atlaskit/pragmatic-drag-and-drop/element/adapter';
+import { useTrystero } from '../hooks/useTrystero';
 
 interface ResourceCardType {
     id: string;
@@ -122,6 +123,35 @@ export function GameBoard({ gameState, playerId, resourceOffer, buyOffers, sendR
             },
         });
     }, []);
+
+    const { getMergeStart } = useTrystero();
+    const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+
+    useEffect(() => {
+        getMergeStart((merges: { sourceId: string, targetId: string }[]) => {
+            merges.forEach(({ sourceId, targetId }) => {
+                const sourceEl = cardRefs.current.get(sourceId);
+                const targetEl = cardRefs.current.get(targetId);
+
+                if (sourceEl && targetEl) {
+                    const sourceRect = sourceEl.getBoundingClientRect();
+                    const targetRect = targetEl.getBoundingClientRect();
+
+                    const deltaX = targetRect.left - sourceRect.left;
+                    const deltaY = targetRect.top - sourceRect.top;
+
+                    sourceEl.animate([
+                        { transform: 'translate(0, 0)', opacity: 1, scale: 1, zIndex: 50 },
+                        { transform: `translate(${deltaX}px, ${deltaY}px)`, opacity: 0, scale: 0.5, zIndex: 50 }
+                    ], {
+                        duration: 500,
+                        easing: 'cubic-bezier(0.4, 0, 0.2, 1)',
+                        fill: 'forwards'
+                    });
+                }
+            });
+        });
+    }, [getMergeStart]);
 
     useEffect(() => {
         if (!gameState) return;
@@ -253,7 +283,7 @@ export function GameBoard({ gameState, playerId, resourceOffer, buyOffers, sendR
                             Refreshes in {timeToOffers}s
                         </div>
                     </div>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 min-h-[120px]">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 min-h-[100px]">
                         <AnimatePresence>
                             {buyOffers.map((offer) => (
                                 <BuyOffer
@@ -280,6 +310,10 @@ export function GameBoard({ gameState, playerId, resourceOffer, buyOffers, sendR
                                 <ResourceCard
                                     key={card.id}
                                     card={card}
+                                    cardRef={(el) => {
+                                        if (el) cardRefs.current.set(card.id, el);
+                                        else cardRefs.current.delete(card.id);
+                                    }}
                                     onClick={() => {
                                         // Find best matching offer (highest price)
                                         const matchingOffers = buyOffers
@@ -302,13 +336,23 @@ export function GameBoard({ gameState, playerId, resourceOffer, buyOffers, sendR
                                 Inventory is empty. Wait for a resource drop!
                             </div>
                         )}
-                        playerGold={gameState.gold}
-                        onSelect={(card) => {
-                            sendResourceChoice(card);
-                            setResourceOffer(null);
-                        }}
+                    </div>
+                </div>
+            </div>
+
+            <BottomToolbar gameState={gameState} onBuyDrop={onBuyDrop} onSellItem={onSellItem} />
+
+            {resourceOffer && (
+                <OfferModal
+                    offers={resourceOffer.offers}
+                    expiry={resourceOffer.expiry}
+                    playerGold={gameState.gold}
+                    onSelect={(card) => {
+                        sendResourceChoice(card);
+                        setResourceOffer(null);
+                    }}
                 />
             )}
-                    </div>
-                    );
+        </div>
+    );
 }

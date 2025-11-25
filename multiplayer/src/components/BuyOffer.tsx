@@ -58,19 +58,19 @@ export function BuyOffer({ offer, onDrop }: BuyOfferProps) {
             className="relative"
         >
             <Card className={`transition-colors border-2 border-dashed ${isOver ? 'border-white bg-white/10' : colorClass}`}>
-                <CardHeader className="pb-2">
-                    <CardTitle className="text-lg capitalize flex justify-between">
+                <CardHeader className="p-3 pb-1">
+                    <CardTitle className="text-sm capitalize flex justify-between items-center">
                         <span>{offer.type}</span>
-                        <span className="text-sm font-normal opacity-70">Buying</span>
+                        <span className="text-xs font-normal opacity-70">Buying</span>
                     </CardTitle>
                 </CardHeader>
-                <CardContent>
-                    <div className="space-y-1">
-                        <div className="text-2xl font-bold">{offer.quantity} {offer.unit}</div>
-                        <div className="text-sm opacity-70">
+                <CardContent className="p-3 pt-1">
+                    <div className="space-y-0.5">
+                        <div className="text-lg font-bold leading-tight">{offer.quantity} {offer.unit}</div>
+                        <div className="text-xs opacity-70">
                             Price: <span className="font-bold text-green-400">{offer.pricePerUnit}g</span> / unit
                         </div>
-                        <div className="text-xs uppercase tracking-wider opacity-50 mt-2">
+                        <div className="text-[10px] uppercase tracking-wider opacity-50 mt-1">
                             Expires in {(offer.expiry - Date.now()) > 0 ? Math.ceil((offer.expiry - Date.now()) / 1000) : 0}s
                         </div>
                     </div>
