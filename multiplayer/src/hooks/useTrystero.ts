@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import { joinRoom } from 'trystero/torrent';
+import FingerprintJS from '@fingerprintjs/fingerprintjs';
 
 const appId = 'nanni-app';
 const roomId = 'nanni-room';
@@ -12,8 +13,8 @@ export function useTrystero(roomId: string = 'nanni-lobby') {
     const [gameState, setGameState] = useState<any>(null);
     const [resourceOffer, setResourceOffer] = useState<any>(null);
     const [buyOffers, setBuyOffers] = useState<any[]>([]);
-    const [retryCount, setRetryCount] = useState(0);
     const [reconnectDelay, setReconnectDelay] = useState(500); // Start with 500ms
+    const [fingerprint, setFingerprint] = useState<string>('');
 
     const sendMessageRef = useRef<(msg: string) => void>(() => { });
     const sendResourceChoiceRef = useRef<(card: any) => void>(() => { });
@@ -26,15 +27,24 @@ export function useTrystero(roomId: string = 'nanni-lobby') {
     const getMergeStartRef = useRef<any>(null);
     const getMatchFoundRef = useRef<any>(null);
 
-    // Watchdog for reconnection
+    // Initialize browser fingerprint
+    useEffect(() => {
+        const initFingerprint = async () => {
+            const fp = await FingerprintJS.load();
+            const result = await fp.get();
+            setFingerprint(result.visitorId);
+            console.log('Browser fingerprint:', result.visitorId);
+        };
+        initFingerprint();
+    }, []);
+
+    // Watchdog for monitoring connection status
     useEffect(() => {
         let timeoutId: number;
 
         if (peers.length === 0) {
             timeoutId = setTimeout(() => {
-                console.log(`No peers found for ${reconnectDelay}ms, attempting reconnect (Attempt ${retryCount + 1})...`);
-                setRetryCount(c => c + 1);
-                setReconnectDelay(prev => Math.min(prev * 1.5, 5000)); // Backoff up to 5s
+                console.warn(`No peers connected after ${reconnectDelay}ms. Waiting for connection...`);
             }, reconnectDelay);
         } else {
             // Reset delay when connected
@@ -42,7 +52,7 @@ export function useTrystero(roomId: string = 'nanni-lobby') {
         }
 
         return () => clearTimeout(timeoutId);
-    }, [peers.length, retryCount, reconnectDelay]);
+    }, [peers.length, reconnectDelay]);
 
     useEffect(() => {
         // Initialize Player ID
@@ -53,9 +63,9 @@ export function useTrystero(roomId: string = 'nanni-lobby') {
         }
         setPlayerId(storedId);
 
-        if (!roomId) return;
+        if (!roomId || !fingerprint) return;
 
-        console.log(`Joining room: ${roomId} (Attempt ${retryCount + 1})`);
+        console.log(`Joining room: ${roomId}`);
         const room = joinRoom({ appId }, roomId);
 
         const [send, getMessage] = room.makeAction('message');
@@ -94,8 +104,8 @@ export function useTrystero(roomId: string = 'nanni-lobby') {
                 return newPeers;
             });
             // Identify ourselves to the new peer (server)
-            if (storedId) {
-                sendIdentity({ playerId: storedId }, peerId);
+            if (storedId && fingerprint) {
+                sendIdentity({ playerId: storedId, fingerprint, userAgent: navigator.userAgent }, peerId);
             }
         });
 
@@ -145,7 +155,7 @@ export function useTrystero(roomId: string = 'nanni-lobby') {
             setIsConnected(false);
             setGameState(null);
         };
-    }, [roomId, retryCount]);
+    }, [roomId, fingerprint]);
 
     const getMergeStart = (callback: (data: any, peerId: string) => void) => {
         if (getMergeStartRef.current) {

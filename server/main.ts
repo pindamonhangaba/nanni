@@ -136,6 +136,10 @@ if (import.meta.main) {
     onlinePlayers = new Map<string, { playerId: string, lastSeen: number }>();
     playerTimers = new Map<string, { nextDrop: number, nextBuyOffer: number }>();
     playerOffers = new Map<string, BuyOffer[]>();
+    // Track connections by fingerprint to enforce single connection per client
+    clientConnections = new Map<string, { peerId: string, playerId: string, userAgent: string, connectedAt: number }>();
+    // Track peer leave timestamps to prevent rapid reconnections
+    peerLeaveTimestamps = new Map<string, number>();
     kv: Deno.Kv;
     cleanupInterval: number;
 
@@ -149,6 +153,18 @@ if (import.meta.main) {
 
       // Game Loop
       this.cleanupInterval = setInterval(() => this.gameLoop(), 1000);
+    }
+
+    destroy() {
+      // Clean up interval
+      if (this.cleanupInterval) {
+        clearInterval(this.cleanupInterval);
+      }
+      // Leave the room to close WebRTC connections
+      if (this.room && this.room.leave) {
+        this.room.leave();
+      }
+      console.log(`Game Room ${this.roomId} destroyed.`);
     }
 
     setupActions() {
@@ -171,12 +187,68 @@ if (import.meta.main) {
 
       this.room.onPeerLeave((peerId: string) => {
         console.log(`[${this.roomId}] Peer left: ${peerId}`);
+        
+        // Track leave timestamp for rate limiting
+        this.peerLeaveTimestamps.set(peerId, Date.now());
+        
         this.onlinePlayers.delete(peerId);
         this.playerTimers.delete(peerId);
+
+        // Clean up fingerprint tracking
+        for (const [fingerprint, connection] of this.clientConnections.entries()) {
+          if (connection.peerId === peerId) {
+            this.clientConnections.delete(fingerprint);
+            console.log(`[${this.roomId}] Removed fingerprint tracking for ${fingerprint}`);
+            break;
+          }
+        }
+        
+        // Clean up old leave timestamps (older than 5 minutes)
+        const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
+        for (const [pid, timestamp] of this.peerLeaveTimestamps.entries()) {
+          if (timestamp < fiveMinutesAgo) {
+            this.peerLeaveTimestamps.delete(pid);
+          }
+        }
       });
 
       getIdentity((data: any, peerId: string) => {
         if (data && data.playerId) {
+          // Rate limiting: prevent rapid reconnections
+          const lastLeaveTime = this.peerLeaveTimestamps.get(peerId);
+          if (lastLeaveTime && (Date.now() - lastLeaveTime) < 2000) {
+            console.log(`[${this.roomId}] Rate limit: Peer ${peerId} trying to reconnect too quickly (${Date.now() - lastLeaveTime}ms since last leave)`);
+            return; // Ignore this connection attempt
+          }
+          
+          const { fingerprint, userAgent } = data;
+
+          // Check if this fingerprint is already connected
+          if (fingerprint && this.clientConnections.has(fingerprint)) {
+            const existing = this.clientConnections.get(fingerprint)!;
+            if (existing.peerId !== peerId) {
+              console.log(`[${this.roomId}] Duplicate connection detected for fingerprint ${fingerprint}`);
+              console.log(`  Existing: peerId=${existing.peerId}, playerId=${existing.playerId}`);
+              console.log(`  New: peerId=${peerId}, playerId=${data.playerId}`);
+              console.log(`  Disconnecting old connection...`);
+
+              // Clean up old connection
+              this.onlinePlayers.delete(existing.peerId);
+              this.playerTimers.delete(existing.peerId);
+              this.clientConnections.delete(fingerprint);
+            }
+          }
+
+          // Track this connection
+          if (fingerprint) {
+            this.clientConnections.set(fingerprint, {
+              peerId,
+              playerId: data.playerId,
+              userAgent: userAgent || 'unknown',
+              connectedAt: Date.now()
+            });
+          }
+
           this.handleJoin(data.playerId, peerId, sendGameState);
         }
       });
@@ -493,24 +565,17 @@ if (import.meta.main) {
       this.room = joinRoom({ appId }, 'nanni-lobby');
       console.log('Lobby started on nanni-lobby');
       this.setupActions();
-      this.loadRooms();
+      this.clearRooms();
     }
 
-    async loadRooms() {
+    async clearRooms() {
       const iter = this.kv.list({ prefix: ['active_rooms'] });
+      let count = 0;
       for await (const res of iter) {
-        const roomId = res.value as string;
-        if (!this.activeRooms.has(roomId)) {
-          console.log(`Restoring room: ${roomId}`);
-          const gameRoom = new GameRoom(roomId, this.kv);
-          this.activeRooms.set(roomId, {
-            id: roomId,
-            playerIds: [], // We don't persist player lists for now, they will rejoin
-            createdAt: Date.now(),
-            instance: gameRoom
-          });
-        }
+        await this.kv.delete(res.key);
+        count++;
       }
+      console.log(`Cleared ${count} stale game rooms from KV.`);
     }
 
     async saveRoom(roomId: string) {
