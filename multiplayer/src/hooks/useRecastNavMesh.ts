@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import * as THREE from 'three';
-import { init } from 'recast-navigation';
+import { init, NavMeshQuery } from 'recast-navigation';
 import { generateSoloNavMesh } from 'recast-navigation/generators';
 
 let recastInitialized = false;
@@ -34,114 +34,220 @@ export function useRecastNavMesh(
           recastInitialized = true;
         }
 
-        // Filter geometry to only include upward-facing triangles (floor + building rooftops)
-        const filteredGeometry = filterUpwardFacingTriangles(geometry);
+        // Use the full geometry (including walls) for Recast
+        // Recast needs the walls to define obstacles
+        // We rely on walkableSlopeAngle to prevent walking on walls
+        const geometryToUse = geometry;
 
-        if (!filteredGeometry) {
-          console.warn('No upward-facing triangles found');
-          setIsGenerating(false);
-          return;
-        }
-
-        console.log('[useRecastNavMesh] Filtered geometry has', 
-          filteredGeometry.attributes.position.count, 'vertices');
-
-        // Use provided off-mesh connections or generate them from geometry
-        let connections: any[];
-        let originalConnections: any[];
-        if (providedOffMeshConnections && providedOffMeshConnections.length > 0) {
-          console.log('[useRecastNavMesh] Using', providedOffMeshConnections.length, 'provided off-mesh connections');
-          
-          // Store original connections with type info for movement system
-          originalConnections = providedOffMeshConnections;
-          
-          // Create recast-compatible connections (without 'type' field)
-          connections = providedOffMeshConnections.map((conn, index) => {
-            const recastConn = {
-              startPosition: conn.startPosition,
-              endPosition: conn.endPosition,
-              radius: conn.radius,
-              bidirectional: conn.bidirectional,
-              area: 0, // Same area as walkable surface
-              flags: 0xffff, // All flags enabled
-              userId: conn.userId ?? index
-            };
-            console.log('[useRecastNavMesh] Connection', index, ':', conn.type, 'from', conn.startPosition, 'to', conn.endPosition);
-            return recastConn;
-          });
-        } else {
-          // Fallback: Detect building heights and create off-mesh connections automatically
-          console.log('[useRecastNavMesh] No provided connections, generating from geometry');
-          connections = generateOffMeshConnections(filteredGeometry);
-          originalConnections = connections;
-        }
-        
-        console.log('[useRecastNavMesh] Generated', connections.length, 'off-mesh connections');
-        if (connections.length > 0) {
-          console.log('[useRecastNavMesh] Sample connection:', connections[0]);
-        }
-        // Store original connections (with type info) for movement system
-        setOffMeshConnections(originalConnections);
+        console.log('[useRecastNavMesh] Geometry has', 
+          geometryToUse.attributes.position.count, 'vertices');
 
         // Extract positions and indices from geometry for recast
-        const positions = filteredGeometry.attributes.position.array as Float32Array;
-        const indices = filteredGeometry.index?.array as Uint32Array | Uint16Array;
+        const positions = geometryToUse.attributes.position.array as Float32Array;
+        
+        // Handle non-indexed geometry
+        let indices: Uint32Array | Uint16Array | number[];
+        if (geometryToUse.index) {
+          indices = geometryToUse.index.array as Uint32Array | Uint16Array;
+        } else {
+          // Generate indices for non-indexed geometry (0, 1, 2, 3, 4, 5...)
+          const vertexCount = geometryToUse.attributes.position.count;
+          indices = new Uint32Array(vertexCount);
+          for (let i = 0; i < vertexCount; i++) {
+            indices[i] = i;
+          }
+        }
 
         console.log('[useRecastNavMesh] Positions array length:', positions.length);
         console.log('[useRecastNavMesh] Indices array length:', indices.length);
-        console.log('[useRecastNavMesh] Passing config with', connections.length, 'offMeshConnections');
 
-        // Log first few connections to verify format
-        console.log('[useRecastNavMesh] First 3 connections to pass to navmesh:');
-        connections.slice(0, 3).forEach((conn, i) => {
-          console.log(`  [${i}]:`, JSON.stringify(conn));
-        });
+        const navMeshConfig = {
+          cs: 0.5,
+          ch: 0.2,
+          walkableRadius: 1, // 0.5m / 0.5cs = 1 voxel
+          walkableHeight: 10, // 2m / 0.2ch = 10 voxels
+          walkableClimb: 2, // 0.4m / 0.2ch = 2 voxels
+          walkableSlopeAngle: 45,
+          borderSize: 0, 
+          tileSize: 0, 
+        };
 
-        // Generate navmesh using recast-navigation core API
+        // First: build a temporary navmesh (no off-mesh) to snap endpoints
+        console.log('[useRecastNavMesh] Generating temp NavMesh for snapping...');
+        const { success: tempSuccess, navMesh: tempNavMesh } = generateSoloNavMesh(
+          Array.from(positions),
+          Array.from(indices),
+          navMeshConfig
+        );
+
+        let snappedConnections: typeof providedOffMeshConnections = [];
+
+        const failedConnections: any[] = [];
+
+        if (tempSuccess && tempNavMesh) {
+          try {
+            const query = new NavMeshQuery(tempNavMesh);
+            const extents = { halfExtents: { x: 8, y: 12, z: 8 } }; // more generous to catch roof/ground
+            const snapped: any[] = [];
+            let ok = 0;
+
+            (providedOffMeshConnections || []).forEach((c, idx) => {
+              const startResult = query.findClosestPoint(c.startPosition, extents);
+              const endResult = query.findClosestPoint(c.endPosition, extents);
+
+              const startDist = startResult.success
+                ? Math.hypot(
+                    startResult.point.x - c.startPosition.x,
+                    startResult.point.y - c.startPosition.y,
+                    startResult.point.z - c.startPosition.z
+                  )
+                : Infinity;
+
+              const endDist = endResult.success
+                ? Math.hypot(
+                    endResult.point.x - c.endPosition.x,
+                    endResult.point.y - c.endPosition.y,
+                    endResult.point.z - c.endPosition.z
+                  )
+                : Infinity;
+
+              const startOk = startResult.success && startDist < 20;
+              const endOk = endResult.success && endDist < 20;
+
+              if (startOk && endOk) {
+                ok += 1;
+                snapped.push({
+                  ...c,
+                  startPosition: { x: startResult.point.x, y: startResult.point.y, z: startResult.point.z },
+                  endPosition: { x: endResult.point.x, y: endResult.point.y, z: endResult.point.z },
+                });
+              } else {
+                failedConnections.push(c);
+                console.warn(
+                  `[useRecastNavMesh] Snap failed for connection ${c.userId || idx}: startOk=${startOk} (${startDist.toFixed(2)}m), endOk=${endOk} (${endDist.toFixed(2)}m)`
+                );
+              }
+            });
+
+            console.log(`[useRecastNavMesh] Snap success: ${ok}/${(providedOffMeshConnections || []).length}`);
+            snappedConnections = snapped;
+            query.destroy();
+          } catch (e) {
+            console.warn('[useRecastNavMesh] Failed snapping connections:', e);
+            snappedConnections = providedOffMeshConnections || [];
+          } finally {
+            tempNavMesh.destroy();
+          }
+        } else {
+          console.warn('[useRecastNavMesh] Temp NavMesh generation failed, using unsnapped connections');
+          snappedConnections = providedOffMeshConnections || [];
+          if (tempNavMesh) tempNavMesh.destroy();
+        }
+
+        // Merge snapped + failed originals so nothing is dropped
+        const mergedConnections = [...snappedConnections, ...failedConnections];
+
+        // Generate NavMesh with snapped connections
+        console.log('[useRecastNavMesh] Generating NavMesh...');
+        
+        const connectionsForRecast = (mergedConnections || []).map(c => ({
+            startPosition: [c.startPosition.x, c.startPosition.y, c.startPosition.z] as [number, number, number],
+            endPosition: [c.endPosition.x, c.endPosition.y, c.endPosition.z] as [number, number, number],
+            radius: 4.0, // generous to ensure overlap
+            bidirectional: true,
+            area: 0, 
+            flags: 1, 
+            userId: c.userId
+        }));
+
+        if (connectionsForRecast.length > 0) {
+            console.log('[useRecastNavMesh] Passing', connectionsForRecast.length, 'connections to Recast');
+        }
+
         const { success, navMesh: generatedNavMesh } = generateSoloNavMesh(
           Array.from(positions),
           Array.from(indices),
           {
-            cs: 0.5, // cell size - increased for better performance with large connections
-            ch: 0.2, // cell height
-            walkableRadius: 1, // agent radius - reduced to allow tighter paths
-            walkableHeight: 8, // Increased to handle building heights
-            walkableClimb: 0.5, // Keep low - off-mesh connections handle vertical movement
-            walkableSlopeAngle: 35,
-            offMeshConnections: connections, // Add the generated connections
+            ...navMeshConfig,
+            offMeshConnections: connectionsForRecast
           }
         );
         
         console.log('[useRecastNavMesh] generateSoloNavMesh result - success:', success);
 
-        if (success) {
-          console.log('NavMesh generated successfully');
-          
-          // Verify off-mesh connections are in the navmesh
-          import('recast-navigation').then(({ NavMesh: NavMeshClass }) => {
-            const navMeshInstance = new NavMeshClass(generatedNavMesh);
-            
-            // Try to get all tiles and check for off-mesh connections
-            let totalOffMeshConnections = 0;
-            for (let i = 0; i < navMeshInstance.getMaxTiles(); i++) {
-              const tile = navMeshInstance.getTileAt(i);
-              if (tile) {
-                const header = tile.header;
-                if (header && header.offMeshConCount > 0) {
-                  totalOffMeshConnections += header.offMeshConCount;
-                  console.log('[useRecastNavMesh] Tile', i, 'has', header.offMeshConCount, 'off-mesh connections');
-                }
-              }
-            }
-            console.log('[useRecastNavMesh] Total off-mesh connections in navmesh:', totalOffMeshConnections);
-          });
-          
+        if (success && generatedNavMesh) {
           setNavMesh(generatedNavMesh);
+          
+          // Update state with connections for movement system
+          // We just pass through the provided connections since we aren't modifying them anymore
+          // Use merged positions for movement system (preserve type/userId)
+          setOffMeshConnections(mergedConnections || []);
+          
+          // Debug info
+          try {
+            const tile = generatedNavMesh.getTile(0);
+            if (tile) {
+                const header = tile.header();
+                if (header) {
+                    console.log(`[useRecastNavMesh] Generated tile has ${header.offMeshConCount()} off-mesh connections`);
+                    console.log(`[useRecastNavMesh] Generated tile has ${header.polyCount()} polygons`);
+                    console.log(`[useRecastNavMesh] Generated tile has ${header.vertCount()} vertices`);
+                } else {
+                    console.warn('[useRecastNavMesh] Failed to get tile header');
+                }
+            }
+          } catch (e) {
+             console.warn('[useRecastNavMesh] Failed to inspect tile header:', e);
+          }
+
+          // Validate each off-mesh connection against the generated navmesh to see if endpoints snap
+          try {
+            const query = new NavMeshQuery(generatedNavMesh);
+            const extents = { halfExtents: { x: 4, y: 4, z: 4 } };
+            let validCount = 0;
+
+            (providedOffMeshConnections || []).forEach((conn, idx) => {
+              const start = query.findClosestPoint(conn.startPosition, extents);
+              const end = query.findClosestPoint(conn.endPosition, extents);
+
+              const startDist = start.success
+                ? Math.sqrt(
+                    Math.pow(start.point.x - conn.startPosition.x, 2) +
+                    Math.pow(start.point.y - conn.startPosition.y, 2) +
+                    Math.pow(start.point.z - conn.startPosition.z, 2)
+                  )
+                : Infinity;
+
+              const endDist = end.success
+                ? Math.sqrt(
+                    Math.pow(end.point.x - conn.endPosition.x, 2) +
+                    Math.pow(end.point.y - conn.endPosition.y, 2) +
+                    Math.pow(end.point.z - conn.endPosition.z, 2)
+                  )
+                : Infinity;
+
+              const ok = start.success && end.success && startDist < 5 && endDist < 5;
+              if (ok) validCount += 1;
+
+              if (!ok) {
+                console.warn(
+                  `[useRecastNavMesh] Connection ${conn.userId || idx} failed snap: startDist=${startDist.toFixed(2)}, endDist=${endDist.toFixed(2)}, startSuccess=${start.success}, endSuccess=${end.success}`
+                );
+              }
+            });
+
+            console.log(`[useRecastNavMesh] Connection snap validation: ${validCount}/${(providedOffMeshConnections || []).length} within 5m`);
+            query.destroy();
+          } catch (e) {
+            console.warn('[useRecastNavMesh] Failed to validate off-mesh snaps:', e);
+          }
         } else {
-          console.error('Failed to generate NavMesh');
+          console.error('[useRecastNavMesh] Failed to generate NavMesh');
         }
+        
+        console.log('[useRecastNavMesh] ✓ NavMesh generated successfully');
       } catch (error) {
-        console.error('Error generating NavMesh:', error);
+        console.error('[useRecastNavMesh] Error generating NavMesh:', error);
       } finally {
         setIsGenerating(false);
       }

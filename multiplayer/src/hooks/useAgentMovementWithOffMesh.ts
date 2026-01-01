@@ -7,6 +7,7 @@ interface OffMeshConnection {
   endPosition: { x: number; y: number; z: number };
   type: OffMeshConnectionType;
   radius: number;
+  bidirectional?: boolean;
 }
 
 interface UseAgentMovementProps {
@@ -64,57 +65,65 @@ export function useAgentMovementWithOffMesh({
   }, []);
 
   // Check if there's an off-mesh connection between two waypoints
-  const findOffMeshConnection = useCallback((from: THREE.Vector3, to: THREE.Vector3): OffMeshConnection | null => {
+  const findOffMeshConnection = useCallback((from: THREE.Vector3, to: THREE.Vector3): { connection: OffMeshConnection, isReverse: boolean } | null => {
     console.log('[findOffMeshConnection] Checking segment from', from, 'to', to);
-    console.log('[findOffMeshConnection] Available connections:', offMeshConnections.length);
     
-    const heightDiff = Math.abs(to.y - from.y);
-    console.log('[findOffMeshConnection] Height difference:', heightDiff);
-    
-    // Check for large vertical movement that indicates an off-mesh connection
-    if (heightDiff > 2) {
-      console.log('[findOffMeshConnection] Large height change detected, searching for matching connection...');
-      
-      // Find the closest matching connection by position
-      let bestMatch: OffMeshConnection | null = null;
+    // We prioritize XZ distance because Y might be different due to navmesh projection
+    const getHorizontalDist = (v1: {x: number, z: number}, v2: {x: number, z: number}) => {
+        return Math.sqrt(Math.pow(v1.x - v2.x, 2) + Math.pow(v1.z - v2.z, 2));
+    };
+
+      let bestMatch: { connection: OffMeshConnection, isReverse: boolean } | null = null;
       let bestScore = Infinity;
       
+      // Thresholds
+      const XZ_THRESHOLD = 2.5; // Match generation radius (2.0) plus margin
+      const Y_THRESHOLD = 10.0; // Loose vertical match (ladders can be tall)
+
       for (const conn of offMeshConnections) {
-        // Calculate 3D distances
-        const startDist = new THREE.Vector3(conn.startPosition.x, conn.startPosition.y, conn.startPosition.z)
-          .distanceTo(from);
-        const endDist = new THREE.Vector3(conn.endPosition.x, conn.endPosition.y, conn.endPosition.z)
-          .distanceTo(to);
+        // Check forward direction
+        const startDistXZ = getHorizontalDist(conn.startPosition, from);
+        const endDistXZ = getHorizontalDist(conn.endPosition, to);
+        const startDistY = Math.abs(conn.startPosition.y - from.y);
+        const endDistY = Math.abs(conn.endPosition.y - to.y);
         
-        const forwardScore = startDist + endDist;
+        const forwardScore = startDistXZ + endDistXZ;
         
-        // Check reversed
-        const startDistRev = new THREE.Vector3(conn.endPosition.x, conn.endPosition.y, conn.endPosition.z)
-          .distanceTo(from);
-        const endDistRev = new THREE.Vector3(conn.startPosition.x, conn.startPosition.y, conn.startPosition.z)
-          .distanceTo(to);
+        // Check reverse direction
+        const startDistXZRev = getHorizontalDist(conn.endPosition, from);
+        const endDistXZRev = getHorizontalDist(conn.startPosition, to);
+        const startDistYRev = Math.abs(conn.endPosition.y - from.y);
+        const endDistYRev = Math.abs(conn.startPosition.y - to.y);
         
-        const reverseScore = startDistRev + endDistRev;
-        
-        const score = Math.min(forwardScore, reverseScore);
-        
-        console.log('[findOffMeshConnection] Connection', conn.type, 'score:', score, '(forward:', forwardScore, 'reverse:', reverseScore, ')');
-        
-        if (score < bestScore && score < 5) { // Within 5 units total
-          bestScore = score;
-          bestMatch = conn;
+        const reverseScore = startDistXZRev + endDistXZRev;
+
+        // Check forward match
+        if (startDistXZ < XZ_THRESHOLD && endDistXZ < XZ_THRESHOLD && 
+            startDistY < Y_THRESHOLD && endDistY < Y_THRESHOLD) {
+            
+            if (forwardScore < bestScore) {
+                bestScore = forwardScore;
+                bestMatch = { connection: conn, isReverse: false };
+            }
+        }
+
+        // Check reverse match
+        if (conn.bidirectional && 
+            startDistXZRev < XZ_THRESHOLD && endDistXZRev < XZ_THRESHOLD &&
+            startDistYRev < Y_THRESHOLD && endDistYRev < Y_THRESHOLD) {
+            
+            if (reverseScore < bestScore) {
+                bestScore = reverseScore;
+                bestMatch = { connection: conn, isReverse: true };
+            }
         }
       }
       
       if (bestMatch) {
-        console.log('[findOffMeshConnection] ✓ Found matching off-mesh connection:', bestMatch.type, 'with score:', bestScore);
-        return bestMatch;
-      } else {
-        console.log('[findOffMeshConnection] ✗ No matching connection found');
+        console.log('[findOffMeshConnection] Found match!', bestMatch.connection.type, bestMatch.isReverse ? '(Reverse)' : '(Forward)');
       }
-    }
-    
-    return null;
+      
+      return bestMatch;
   }, [offMeshConnections]);
 
   const update = useCallback((
@@ -184,14 +193,26 @@ export function useAgentMovementWithOffMesh({
       if (currentWaypointIndex < path.length - 1) {
         // Check if next segment is an off-mesh connection
         const nextWaypoint = path[currentWaypointIndex + 1];
-        const offMeshConn = findOffMeshConnection(targetWaypoint, nextWaypoint);
+        const match = findOffMeshConnection(targetWaypoint, nextWaypoint);
         
-        if (offMeshConn) {
-          console.log('[useAgentMovementWithOffMesh] Starting', offMeshConn.type, 'traversal');
+        if (match) {
+          const { connection, isReverse } = match;
+          console.log('[useAgentMovementWithOffMesh] Starting', connection.type, 'traversal');
+          
+          // Use the STORED connection coordinates, not the pathfinder's coordinates
+          // This ensures we actually climb to the roof even if pathfinder gave ground coords
+          const startPos = isReverse 
+            ? new THREE.Vector3(connection.endPosition.x, connection.endPosition.y, connection.endPosition.z)
+            : new THREE.Vector3(connection.startPosition.x, connection.startPosition.y, connection.startPosition.z);
+            
+          const endPos = isReverse
+            ? new THREE.Vector3(connection.startPosition.x, connection.startPosition.y, connection.startPosition.z)
+            : new THREE.Vector3(connection.endPosition.x, connection.endPosition.y, connection.endPosition.z);
+
           setTraversalState({
-            type: offMeshConn.type,
-            startPos: targetWaypoint.clone(),
-            endPos: nextWaypoint.clone(),
+            type: connection.type,
+            startPos: startPos,
+            endPos: endPos,
             progress: 0
           });
           setCurrentWaypointIndex(currentWaypointIndex + 1);

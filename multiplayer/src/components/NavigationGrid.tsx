@@ -7,6 +7,7 @@ import {
 } from "react";
 import type { ThreeElements } from "@react-three/fiber";
 import * as THREE from "three";
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { generateCityGeometry } from "@/utils/generateCity";
 import { createProceduralGroundShape } from "@/lib/createProceduralGroundShape";
 import { useRecastNavMesh } from "@/hooks/useRecastNavMesh";
@@ -162,20 +163,70 @@ export const NavigationGrid = forwardRef<THREE.Mesh, NavigationGridProps>(
     const innerRef = useRef<THREE.Mesh>(null);
     const { scene } = useThree();
 
-    // Generate city with buildings
+    // Generate combined geometry: procedural ground + buildings
     const { visualGeometry, navGeometry, offMeshConnections: cityOffMeshConnections } = useMemo(() => {
       const w = (props.width ?? 10) * (props.cellSize ?? 3);
       const h = (props.height ?? 10) * (props.cellSize ?? 3);
       
-      console.log('[NavigationGrid] Generating city with buildings, dimensions:', w, 'x', h);
+      console.log('[NavigationGrid] Generating procedural ground + buildings, dimensions:', w, 'x', h);
+
+      // 1. Generate city with buildings FIRST (so we can cut holes in floor)
+      const cityResult = generateCityGeometry(w, h, 15, true);
       
-      // Generate city with buildings - increased building count for more interesting layout
-      const result = generateCityGeometry(w, h, 15);
+      // 2. Generate procedural rectilinear polygon for floor
+      const { shape, curveSegments } = createProceduralGroundShape({
+        seed: 'multiplayer-ground',
+        minArea: w * h * 0.6,
+        maxArea: w * h * 0.9,
+        pad: 4,
+        radius: 3,
+        roundConcave: false,
+        cellSize: 1,
+      });
+
+      // Calculate shape center to align with world coordinates
+      const points = shape.getPoints();
+      const min = new THREE.Vector2(Infinity, Infinity);
+      const max = new THREE.Vector2(-Infinity, -Infinity);
+      points.forEach(p => {
+        min.min(p);
+        max.max(p);
+      });
+      const shapeCenter = new THREE.Vector2().addVectors(min, max).multiplyScalar(0.5);
       
-      console.log('[NavigationGrid] Generated', result.buildings.length, 'buildings');
-      console.log('[NavigationGrid] Generated', result.offMeshConnections.length, 'rooftop connections');
+      // Create Visual Geometry (Clean floor)
+      const floorGeometry = new THREE.ShapeGeometry(shape, curveSegments);
+      floorGeometry.rotateX(-Math.PI / 2);
+      floorGeometry.translate(-shapeCenter.x, 0, shapeCenter.y);
+
+      console.log('[NavigationGrid] Generated rectilinear floor + ', cityResult.buildings.length, 'buildings');
+      console.log('[NavigationGrid] Generated', cityResult.offMeshConnections.length, 'rooftop connections');
       
-      return result;
+      // 3. Merge procedural floor with buildings
+      
+      // Helper to prepare geometry for merging
+      const prepareForMerge = (geo: THREE.BufferGeometry) => {
+        let bufferGeo = geo instanceof THREE.BufferGeometry ? geo : new THREE.BufferGeometry().copy(geo);
+        if (bufferGeo.index) {
+          bufferGeo = bufferGeo.toNonIndexed();
+        }
+        return bufferGeo;
+      };
+
+      const floorBufferGeometry = prepareForMerge(floorGeometry);
+      
+      // Merge for Visuals AND NavMesh (Same geometry now)
+      const geometriesToMerge = [floorBufferGeometry];
+      if (cityResult.visualGeometry && cityResult.visualGeometry.getAttribute('position')) {
+        geometriesToMerge.push(cityResult.visualGeometry);
+      }
+      const combinedGeometry = mergeGeometries(geometriesToMerge, false);
+
+      return {
+        visualGeometry: combinedGeometry, // Clean floor + buildings
+        navGeometry: combinedGeometry, // Same geometry for navmesh (Recast will handle obstacles)
+        offMeshConnections: cityResult.offMeshConnections
+      };
     }, [props.width, props.height, props.cellSize]);
 
     // Generate navmesh from the navGeometry with off-mesh connections

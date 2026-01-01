@@ -22,7 +22,8 @@ interface OffMeshConnection {
 export function generateCityGeometry(
   width: number,
   height: number,
-  buildingCount: number = 10
+  buildingCount: number = 10,
+  skipFloor: boolean = false
 ): { 
   visualGeometry: THREE.BufferGeometry; 
   navGeometry: THREE.BufferGeometry; 
@@ -160,12 +161,12 @@ export function generateCityGeometry(
               const wz = (z * navRes) - (height/2) + (navRes/2);
               const h = navRes / 2;
 
-              // 4 Vertices (Y=0.2 for ground level)
+              // 4 Vertices (Y=0 for ground level)
               // TL, TR, BL, BR
-              navVertices.push(wx - h, 0.2, wz - h); // TL
-              navVertices.push(wx + h, 0.2, wz - h); // TR
-              navVertices.push(wx - h, 0.2, wz + h); // BL
-              navVertices.push(wx + h, 0.2, wz + h); // BR
+              navVertices.push(wx - h, 0, wz - h); // TL
+              navVertices.push(wx + h, 0, wz - h); // TR
+              navVertices.push(wx - h, 0, wz + h); // BL
+              navVertices.push(wx + h, 0, wz + h); // BR
 
               // Indices (0, 2, 1, 2, 3, 1)
               navIndices.push(vertOffset, vertOffset + 2, vertOffset + 1);
@@ -178,7 +179,8 @@ export function generateCityGeometry(
 
   // 3b. Add Rooftop Navigation Surfaces
   // Create walkable planes on top of each building
-  buildings.forEach(b => {
+  let roofNavCellCount = 0;
+  buildings.forEach((b, idx) => {
       const roofY = b.height; // Top of building
       const roofW = b.width;
       const roofD = b.depth;
@@ -197,27 +199,35 @@ export function generateCityGeometry(
           const startX = b.position.x - (roofCols * navRes) / 2;
           const startZ = b.position.z - (roofRows * navRes) / 2;
           
+          let cellsAdded = 0;
           for (let rz = 0; rz < roofRows; rz++) {
               for (let rx = 0; rx < roofCols; rx++) {
                   const wx = startX + (rx * navRes) + (navRes / 2);
                   const wz = startZ + (rz * navRes) + (navRes / 2);
                   const h = navRes / 2;
                   
-                  // 4 Vertices at rooftop height (+0.2 offset)
-                  navVertices.push(wx - h, roofY + 0.2, wz - h); // TL
-                  navVertices.push(wx + h, roofY + 0.2, wz - h); // TR
-                  navVertices.push(wx - h, roofY + 0.2, wz + h); // BL
-                  navVertices.push(wx + h, roofY + 0.2, wz + h); // BR
+                  // 4 Vertices at rooftop height
+                  navVertices.push(wx - h, roofY, wz - h); // TL
+                  navVertices.push(wx + h, roofY, wz - h); // TR
+                  navVertices.push(wx - h, roofY, wz + h); // BL
+                  navVertices.push(wx + h, roofY, wz + h); // BR
                   
                   // Indices
                   navIndices.push(vertOffset, vertOffset + 2, vertOffset + 1);
                   navIndices.push(vertOffset + 2, vertOffset + 3, vertOffset + 1);
                   
                   vertOffset += 4;
+                  cellsAdded++;
               }
           }
+          roofNavCellCount += cellsAdded;
+          console.log(`[generateCity] Building ${idx}: Added ${cellsAdded} rooftop nav cells at Y=${roofY.toFixed(2)}`);
+      } else {
+          console.log(`[generateCity] Building ${idx}: Rooftop too small for nav (${walkableW.toFixed(2)}x${walkableD.toFixed(2)})`);
       }
   });
+  
+  console.log(`[generateCity] Total rooftop nav cells: ${roofNavCellCount}`);
 
   const navGeometry = new THREE.BufferGeometry();
   navGeometry.setAttribute('position', new THREE.Float32BufferAttribute(navVertices, 3));
@@ -226,17 +236,19 @@ export function generateCityGeometry(
 
   // 4. Construct Visual Floor (Coarse Grid)
   // We keep this separate so it looks nice (big tiles)
-  for (let x = 0; x < cols; x++) {
-    for (let y = 0; y < rows; y++) {
-      if (!grid[y * cols + x]) {
-          const floorGeo = new THREE.PlaneGeometry(tileSize, tileSize);
-          floorGeo.rotateX(-Math.PI / 2);
-          floorGeo.translate(
-            (x * tileSize) - (width / 2) + (tileSize / 2),
-            0,
-            (y * tileSize) - (height / 2) + (tileSize / 2)
-          );
-          visualGeometries.push(floorGeo);
+  if (!skipFloor) {
+    for (let x = 0; x < cols; x++) {
+      for (let y = 0; y < rows; y++) {
+        if (!grid[y * cols + x]) {
+            const floorGeo = new THREE.PlaneGeometry(tileSize, tileSize);
+            floorGeo.rotateX(-Math.PI / 2);
+            floorGeo.translate(
+              (x * tileSize) - (width / 2) + (tileSize / 2),
+              0,
+              (y * tileSize) - (height / 2) + (tileSize / 2)
+            );
+            visualGeometries.push(floorGeo);
+        }
       }
     }
   }
@@ -245,7 +257,9 @@ export function generateCityGeometry(
   const nonIndexedVisualGeometries = visualGeometries.map(geo => {
       return geo.index ? geo.toNonIndexed() : geo;
   });
-  const visualGeometry = mergeGeometries(nonIndexedVisualGeometries, false);
+  const visualGeometry = nonIndexedVisualGeometries.length > 0 
+      ? mergeGeometries(nonIndexedVisualGeometries, false) 
+      : new THREE.BufferGeometry();
   
   // 5. Generate Off-Mesh Connections Between Nearby Rooftops
   const offMeshConnections: OffMeshConnection[] = [];
@@ -255,11 +269,11 @@ export function generateCityGeometry(
   buildings.forEach((building, index) => {
     const halfW = building.width / 2;
     const halfD = building.depth / 2;
-    const margin = 1.5; // Distance from building edge where ladder starts
+    const margin = 2.0; // Distance from building edge where ladder starts (center of adjacent tile)
     
-    // IMPORTANT: Use consistent Y values that match the actual navmesh surface heights
-    const groundY = 0.2; // Match the navmesh ground level (slightly above 0)
-    const roofY = building.height + 0.2; // Roof navmesh is at building.height, add small offset
+    // Use exact navmesh surface heights
+    const groundY = 0;
+    const roofY = building.height;
     
     // North side
     offMeshConnections.push({
@@ -271,9 +285,9 @@ export function generateCityGeometry(
       endPosition: {
         x: building.position.x,
         y: roofY,
-        z: building.position.z - halfD
+        z: building.position.z - halfD + 1.0 // Move inward by 1.0
       },
-      radius: 1.0, // Increased radius for easier connection matching
+      radius: 1.5, // Increased radius slightly
       bidirectional: true,
       userId: offMeshConnections.length,
       type: OffMeshConnectionType.Ladder
@@ -289,9 +303,9 @@ export function generateCityGeometry(
       endPosition: {
         x: building.position.x,
         y: roofY,
-        z: building.position.z + halfD
+        z: building.position.z + halfD - 1.0 // Move inward by 1.0
       },
-      radius: 1.0,
+      radius: 1.5,
       bidirectional: true,
       userId: offMeshConnections.length,
       type: OffMeshConnectionType.Ladder
@@ -305,11 +319,11 @@ export function generateCityGeometry(
         z: building.position.z
       },
       endPosition: {
-        x: building.position.x + halfW,
+        x: building.position.x + halfW - 1.0, // Move inward by 1.0
         y: roofY,
         z: building.position.z
       },
-      radius: 1.0,
+      radius: 1.5,
       bidirectional: true,
       userId: offMeshConnections.length,
       type: OffMeshConnectionType.Ladder
@@ -323,11 +337,11 @@ export function generateCityGeometry(
         z: building.position.z
       },
       endPosition: {
-        x: building.position.x - halfW,
+        x: building.position.x - halfW + 1.0, // Move inward by 1.0
         y: roofY,
         z: building.position.z
       },
-      radius: 1.0,
+      radius: 1.5,
       bidirectional: true,
       userId: offMeshConnections.length,
       type: OffMeshConnectionType.Ladder

@@ -144,7 +144,7 @@ const GameSceneContent = ({
   movementRef
 }: GameSceneContentProps) => {
   const { navMesh, offMeshConnections } = useNavMesh();
-  const pathfinding = usePathfinding(navMesh);
+  const pathfinding = usePathfinding(navMesh, offMeshConnections ?? []);
   
   console.log('[GameSceneContent] Off-mesh connections available:', offMeshConnections?.length ?? 0);
   

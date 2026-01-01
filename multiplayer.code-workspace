@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"path": "multiplayer"
+		},
+		{
+			"path": "server"
+		}
+	],
+	"settings": {}
+}
