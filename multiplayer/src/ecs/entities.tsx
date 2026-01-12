@@ -3,7 +3,8 @@ import { world, type Entity } from "../ecs";
 import { Unicorn } from "@/components/models/Unicorn";
 import * as THREE from "three";
 import { useFrame } from "@react-three/fiber";
-import { HealthBar } from "@/components/HealthBar";
+import { HealthBar } from "../components/HealthBar";
+import { v4 as uuidv4 } from "uuid";
 
 export const PlayerEntity = ({ position }: { position: THREE.Vector3 }) => {
   const group = useRef<THREE.Group>(null);
@@ -75,8 +76,13 @@ export const EnemyEntity = ({
   const [entityCreated, setEntityCreated] = useState(false);
 
   useEffect(() => {
-    console.log("[EnemyEntity] MOUNTED at", position.toArray());
+    const entityId = uuidv4();
+    console.log(
+      `[EnemyEntity] CREATING entity ${entityId} at`,
+      position.toArray()
+    );
     const entity = world.add({
+      id: entityId,
       enemy: true,
       position: position.clone(),
       rotation: new THREE.Euler(0, 0, 0),
@@ -97,6 +103,7 @@ export const EnemyEntity = ({
         timer: 0,
       },
     });
+    console.log(`[EnemyEntity] CREATED ${entityId}. Health:`, entity.health);
     entityRef.current = entity;
     setEntityCreated(true);
 
@@ -104,8 +111,18 @@ export const EnemyEntity = ({
       world.addComponent(entity, "sceneObject", group.current);
     }
 
+    const intervalId = setInterval(() => {
+      // Only log if health is unexpected (0 or undefined) or just occasionally
+      if (entity.health === 0 || entity.health === undefined) {
+        console.warn(
+          `[EnemyEntity] WARNING: Entity ${entityId} has health ${entity.health}`
+        );
+      }
+    }, 3000);
+
     return () => {
       console.log("[EnemyEntity] UNMOUNTED");
+      clearInterval(intervalId);
       world.remove(entity);
     };
   }, []);
@@ -119,8 +136,26 @@ export const EnemyEntity = ({
           // Set this enemy as the player's attack target
           const playerEntity = world.with("player").first;
           if (playerEntity && entityRef.current) {
+            console.log("[EnemyEntity] Click detected on enemy");
+            console.log(
+              "[EnemyEntity] Player entity:",
+              playerEntity.player ? "PLAYER" : "NOT PLAYER"
+            );
+            console.log(
+              "[EnemyEntity] Enemy entity:",
+              entityRef.current.enemy ? "ENEMY" : "NOT ENEMY",
+              "ID:",
+              entityRef.current.id
+            );
+            console.log(
+              "[EnemyEntity] Setting player's attackTarget to this enemy"
+            );
             world.update(playerEntity, { attackTarget: entityRef.current });
-            console.log("[EnemyEntity] Player targeting this enemy");
+            console.log(
+              "[EnemyEntity] Player now targeting enemy. Entity dump:",
+              JSON.stringify(entityRef.current)
+            );
+            console.log("Health property:", entityRef.current.health);
           }
         }}
         onPointerOver={(e) => {

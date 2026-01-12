@@ -18,6 +18,15 @@ export function CombatSystem() {
 
       // If entity has an attack target
       if (entity.attackTarget) {
+        // SAFETY CHECK: Prevent self-targeting
+        if (entity.attackTarget === entity) {
+          console.warn(
+            "[CombatSystem] Entity was targeting itself! Clearing target."
+          );
+          world.update(entity, { attackTarget: undefined });
+          continue;
+        }
+
         // Check if target is still valid (alive and has position)
         if (
           !entity.attackTarget.health ||
@@ -25,6 +34,12 @@ export function CombatSystem() {
           !entity.attackTarget.position
         ) {
           // Target is dead or invalid, clear it
+          console.warn(
+            "[CombatSystem] Target invalid! Health:",
+            entity.attackTarget.health,
+            "Position:",
+            !!entity.attackTarget.position
+          );
           world.update(entity, { attackTarget: undefined });
           continue;
         }
@@ -63,14 +78,16 @@ export function CombatSystem() {
             // Update last attack time
             world.update(entity, { lastAttackTime: now });
 
+            const attackerType = entity.player ? "Player" : "Enemy";
+            const targetType = entity.attackTarget.player ? "Player" : "Enemy";
             console.log(
-              `[CombatSystem] Entity dealt ${entity.attackDamage} damage to target. Target health: ${newHealth}`
+              `[CombatSystem] ${attackerType} dealt ${entity.attackDamage} damage to ${targetType}. Target health: ${newHealth}`
             );
 
             // If target died, clear it
             if (newHealth <= 0) {
               world.update(entity, { attackTarget: undefined });
-              console.log("[CombatSystem] Target eliminated");
+              console.log(`[CombatSystem] ${targetType} eliminated`);
             }
           }
         } else {

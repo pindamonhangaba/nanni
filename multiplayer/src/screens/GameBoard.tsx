@@ -120,15 +120,18 @@ const GameSceneWithNavMesh = ({
         targetPoint
       );
       if (path.length > 0) {
-        // Update ECS components
+        // Update ECS components - clear attack target when manually moving
         world.update(playerEntity, {
           path,
           currentWaypointIndex: 0,
           isMoving: true,
+          attackTarget: undefined, // Clear attack target on manual move
           // Reset traversal state if any
           traversalState: undefined,
         });
-        console.log("Path found, updating entity moving to", targetPoint);
+        console.log(
+          "[GameBoard] Player moving to point, attack target cleared"
+        );
       }
     },
     [pathfindingRef]

@@ -7,6 +7,7 @@ import { OffMeshConnectionType } from "@/utils/generateCity"; // We need this ty
 // but the hook uses OffMeshConnectionType enum. I'll rely on it.
 
 export type Entity = {
+  id?: string;
   // Tags
   player?: boolean;
   camera?: boolean;
